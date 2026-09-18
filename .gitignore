@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
+
+# 运行时自动下载的 ffmpeg 二进制
+ffmpeg
+ffmpeg.exe
+
+# 测试产物
+*.tmp
+temp_ffmpeg.zip
