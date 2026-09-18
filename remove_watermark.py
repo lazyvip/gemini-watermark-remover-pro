@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Gemini Watermark Remover Pro (Gemini 图片/视频无痕去水印工具)
-专为去除 Google Gemini / Veo 生成的图片或视频右下角四角星水印设计。
-核心采用纯代数反向 Alpha 混合逆解 (Pure Reverse Alpha Blending)，无损还原底层纹理，零模糊。
-- 图片: 增益 gain=1.0，与官方图片引擎一致，无损精确还原
-- 视频: 增益 gain=0.58 补偿 H.264/YUV420 色彩损耗，可选 Lanczos4 超分至 1080P
-开源地址: https://github.com/lazyvip/gemini-watermark-remover-pro
+Gemini Video Watermark Remover (无痕去水印与高保真超分工具)
+专为去除 Google Gemini / Veo 视频右下角固定四角星水印设计。
+采用自适应 ROI 定位 + 椭圆形态学边缘羽化 + Navier-Stokes / Telea 时空流体修补 + Lanczos4 超分算法。
 """
 
 import os
@@ -248,7 +245,27 @@ def process_image(input_path, output_path, mode="lossless", gain=1.0, logo_size=
     ALPHA_NOISE_FLOOR = 3.0 / 255.0
     ALPHA_THRESHOLD = 0.002
     MAX_ALPHA = 0.99
-    LOGO_VALUE = 255.0
+
+    # 自适应水印配色检测：右下星形区域中心与四角背景的亮度关系决定 LOGO 值。
+    # - 白色加光型水印（深色背景）：logical_logo = 255
+    # - 深色 / 金色减光型水印（浅色背景）：logical_logo = 背景色参考（约等于该区域背景色）
+    detect_roi = color[y:y+ls, x:x+ls].astype(np.float32)
+    c_h, c_w = detect_roi.shape[:2]
+    cx, cy = c_h // 2, c_w // 2
+    inn = detect_roi[cy-2:cy+2, cx-2:cx+2].reshape(-1, 3).mean(axis=0)
+    corn = np.concatenate([
+        detect_roi[:2, :2], detect_roi[:2, -2:],
+        detect_roi[-2:, :2], detect_roi[-2:, -2:],
+    ]).reshape(-1, 3).mean(axis=0)
+    center_lum = float(inn.mean())
+    corner_lum = float(corn.mean())
+    # 若星形中心明显暗于四角背景 → 减光型（深/金色）水印，需要"提亮"式还原
+    is_dark_logo = center_lum < (corner_lum - 12.0)
+    if is_dark_logo:
+        LOGO_VALUE = corn.astype(np.float32)   # 用背景色作还原参考（各通道）
+        gain = 1.0
+    else:
+        LOGO_VALUE = np.array([255.0, 255.0, 255.0])
 
     sig_alpha = np.maximum(0.0, scaled_alpha - ALPHA_NOISE_FLOOR) * gain
     active_mask = sig_alpha >= ALPHA_THRESHOLD
@@ -260,17 +277,27 @@ def process_image(input_path, output_path, mode="lossless", gain=1.0, logo_size=
     if mode == "inpaint":
         local_mask = build_watermark_mask(ls, ls, scale=ls/48.0, dilate_k=3)
         color[y:y+ls, x:x+ls] = cv2.inpaint(roi.astype(np.uint8), local_mask, 5, cv2.INPAINT_TELEA)
+    elif is_dark_logo:
+        # 减光型（深/金色）水印：水印是不透明遮罩，覆盖在较均匀的背景上。
+        # 恢复目标 = 星形精确遮罩内所有像素完全回填背景色；仅在最外圈羽化 1-2px 贴合抗锯齿。
+        bg = corn.astype(np.float32)
+        core = scaled_alpha > 0.08              # 精确星形遮罩
+        w = core.astype(np.float32)
+        # 轻微羽化边缘以贴合抗锯齿
+        wb = cv2.GaussianBlur(w, (5, 5), 0)
+        wb = np.clip(wb * 2.2, 0.0, 1.0)[..., np.newaxis]
+        clean_roi = np.clip(roi * (1.0 - wb) + bg * wb, 0, 255).astype(np.uint8)
     else:
         for c in range(3):
-            orig_c = (roi[:, :, c] - effective_alpha * LOGO_VALUE) / one_minus_alpha
+            orig_c = (roi[:, :, c] - effective_alpha * LOGO_VALUE[c]) / one_minus_alpha
             roi[:, :, c] = np.where(active_mask, np.clip(np.round(orig_c), 0, 255), roi[:, :, c])
         clean_roi = roi.astype(np.uint8)
-        if mode == "hybrid":
-            core_mask = (effective_alpha > 0.25).astype(np.uint8) * 255
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            core_mask = cv2.dilate(core_mask, kernel, iterations=1)
-            clean_roi = cv2.inpaint(clean_roi, core_mask, 2, cv2.INPAINT_TELEA)
-        color[y:y+ls, x:x+ls] = clean_roi
+    if mode == "hybrid":
+        core_mask = (effective_alpha > 0.25).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        core_mask = cv2.dilate(core_mask, kernel, iterations=1)
+        clean_roi = cv2.inpaint(clean_roi, core_mask, 2, cv2.INPAINT_TELEA)
+    color[y:y+ls, x:x+ls] = clean_roi
 
     # 组装并保存
     if has_alpha:
