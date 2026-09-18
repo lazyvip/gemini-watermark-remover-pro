@@ -1,9 +1,9 @@
 ---
-name: "gemini-watermark-remover"
+name: "gemini-watermark-remover-pro"
 description: "Removes the Google Gemini/Veo bottom-right star watermark from videos AND images using Pure Reverse Alpha Blending. Image mode: lossless gain=1.0; Video mode: gain=0.58 + optional Lanczos4 upscaling + audio remux. Zero blurring, 100% texture preservation. Invoke when user wants to clean Gemini watermarks from any file."
 ---
 
-# Gemini 无痕去水印与高保真超分技能 (gemini-watermark-remover)
+# Gemini 无痕去水印与高保真超分技能 (gemini-watermark-remover-pro)
 
 本技能用于自动化去除 Google Gemini / Veo 生成内容右下角的半透明四角星品牌水印，**同时支持图片与视频**，基于纯代数反向 Alpha 混合数学逆解体系（Pure Reverse Alpha Blending），无损还原底层纹理，零模糊、零涂抹。
 

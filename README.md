@@ -46,10 +46,12 @@
 
 ### 视频去水印（Veo）
 
-左侧为 Gemini/Veo 生成的原视频，右侧为去水印后的 1080P 成品——画面细节（衣物纹理、光斑、颗粒）完全保留，没有任何方块糊斑。
+原视频右下角为 Gemini/Veo 的半透明四角星水印，去水印后画面细节（衣物纹理、光斑、颗粒）完全保留，没有任何方块糊斑。
 
-<video controls loop muted playsinline src="docs/demo/gemini_before_preview.mp4" style="width:48%"></video>
-<video controls loop muted playsinline src="docs/demo/gemini_after_preview.mp4" style="width:48%"></video>
+> GitHub 不能在 README 内直接内嵌播放视频。点击下方两个文件名，即可在 GitHub 原生播放器里逐帧对比去水印前后效果：
+
+- ▶ **去水印前（原视频）：** [`gemini_before_preview.mp4`](docs/demo/gemini_before_preview.mp4)
+- ▶ **去水印后（1080P 成品）：** [`gemini_after_preview.mp4`](docs/demo/gemini_after_preview.mp4)
 
 ### 图片去水印（白色加光型 · 深色背景）
 
@@ -67,16 +69,26 @@ Gemini 图片在浅色背景下会使用深/金色不透明水印。工具能**�
 
 ## 🚀 一键安装为 Skill（推荐给不会命令行的人）
 
-这是本项目最省事的用法，甚至**不需要下载安装包**——你只需要对 AI 说一句话：
+把本项目装成 Skill 后，就能让 AI 助手（Trae / Claude Code）直接看懂并调用 `remove_watermark.py`，你负责说一句"帮我去掉这个视频/这张图的水印"即可。
 
-> 🤖 **"安装 Skill：gemini-watermark-remover-pro"**
+### 方式一：让 AI 帮你安装（记得带 GitHub 地址）
 
-### 支持这条指令的 AI 应用
+把下面这句连同**仓库地址**一起发给你的 AI 助手：
+
+> 🤖 **"把这个 GitHub 仓库安装为 Skill：https://github.com/lazyvip/gemini-watermark-remover-pro"**
+
+AI 会把仓库内容下载到本机的 Skill 目录，重启后即生效，之后直接说去水印需求即可。
+
+### 方式二：手动复制（几秒钟，最稳定）
+
+把整个仓库文件夹复制到对应 Skill 目录再重启：
 
 | AI 工具 | 安装路径（复制到该目录再重启） |
 |---------|-------------------------------|
 | **Trae / Claude Code** (macOS) | `~/.trae-cn/skills/gemini-watermark-remover-pro/` |
 | **Trae / Claude Code** (Windows) | `%USERPROFILE%\.trae-cn\skills\gemini-watermark-remover-pro\` |
+
+> ⚠️ **注意：** 只对 AI 说"安装 Skill：gemini-watermark-remover-pro"但**不给来源地址是装不上的**——这个名字不属于任何已登记的 Skill，AI 无法凭空下载。要么附上上面的 GitHub 地址，要么用方式二手动复制。
 
 ### 安装后怎么用
 
@@ -88,7 +100,7 @@ Gemini 图片在浅色背景下会使用深/金色不透明水印。工具能**�
 
 AI 会自动调用项目里的 `remove_watermark.py` 完成解析、去水印和超分，全程无需你碰命令行。
 
-> 💡 手动安装：把仓库文件放到上述 Skill 目录即可；或者用 `run_windows.bat`（Windows 直接拖文件进去）实现零配置处理。
+> 💡 手动装好后也可用 `run_windows.bat`（Windows 直接拖文件进去）实现零配置本机处理。
 
 ---
 
