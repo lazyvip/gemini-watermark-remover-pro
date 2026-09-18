@@ -69,38 +69,36 @@ Gemini 图片在浅色背景下会使用深/金色不透明水印。工具能**�
 
 ## 🚀 一键安装为 Skill（推荐给不会命令行的人）
 
-把本项目装成 Skill 后，就能让 AI 助手（Trae / Claude Code）直接看懂并调用 `remove_watermark.py`，你负责说一句"帮我去掉这个视频/这张图的水印"即可。
+把本项目装成 Skill 后，就能让 AI 助手（Trae / Claude Code）自动看懂并调用 `remove_watermark.py`，你只需说一句"帮我去掉这个视频/这张图的水印"。
 
-### 方式一：让 AI 帮你安装（记得带 GitHub 地址）
+### 方式一：让 AI 帮你安装，装完直接开干
 
-把下面这句连同**仓库地址**一起发给你的 AI 助手：
+把下面这句连同**仓库地址**一起发给你的 AI 助手，安装和调用可以一步到位：
 
-> 🤖 **"把这个 GitHub 仓库安装为 Skill：https://github.com/lazyvip/gemini-watermark-remover-pro"**
+> 🤖 **"把这个 GitHub 仓库安装为 Skill：https://github.com/lazyvip/gemini-watermark-remover-pro，帮我处理 xxx.mp4（或 xxx.png）的水印"**
 
-AI 会把仓库内容下载到本机的 Skill 目录，重启后即生效，之后直接说去水印需求即可。
+AI 会把仓库内容下载到本机的 Skill 目录，随后直接执行去水印任务，无需重启、无需碰命令行。
 
 ### 方式二：手动复制（几秒钟，最稳定）
 
-把整个仓库文件夹复制到对应 Skill 目录再重启：
+把整个仓库文件夹复制到对应 Skill 目录：
 
-| AI 工具 | 安装路径（复制到该目录再重启） |
+| AI 工具 | 安装路径（复制到该目录） |
 |---------|-------------------------------|
 | **Trae / Claude Code** (macOS) | `~/.trae-cn/skills/gemini-watermark-remover-pro/` |
 | **Trae / Claude Code** (Windows) | `%USERPROFILE%\.trae-cn\skills\gemini-watermark-remover-pro\` |
 
-> ⚠️ **注意：** 只对 AI 说"安装 Skill：gemini-watermark-remover-pro"但**不给来源地址是装不上的**——这个名字不属于任何已登记的 Skill，AI 无法凭空下载。要么附上上面的 GitHub 地址，要么用方式二手动复制。
+### 安装后怎么调用
 
-### 安装后怎么用
+装好后，直接对你的 AI 助手说一句话即可自动去水印，比如：
 
-装好后，直接对你的 AI 助手说一句话即可自动去水印：
-
-- *"帮我去掉这个 Gemini 视频的水印"*
+- *"帮我去掉这个 Gemini 视频的水印"*（也可带上文件路径）
 - *"帮我清理这张图右下角的水印"*
 - *"批量处理 `文件夹/` 下所有带水印的图片"*（AI 会循环调用）
 
 AI 会自动调用项目里的 `remove_watermark.py` 完成解析、去水印和超分，全程无需你碰命令行。
 
-> 💡 手动装好后也可用 `run_windows.bat`（Windows 直接拖文件进去）实现零配置本机处理。
+> 💡 不想装 Skill 的话，也可以直接用 `run_windows.bat`（Windows 把文件拖进去）或 `python remove_watermark.py 文件` 本机处理。
 
 ---
 
