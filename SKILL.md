@@ -1,6 +1,6 @@
 ---
 name: "gemini-watermark-remover-pro"
-description: "Removes the Google Gemini/Veo bottom-right star watermark from videos AND images using Pure Reverse Alpha Blending. Image mode: lossless gain=1.0; Video mode: gain=0.58 + optional Lanczos4 upscaling + audio remux. Zero blurring, 100% texture preservation. Invoke when user wants to clean Gemini watermarks from any file."
+description: "Removes the Google Gemini/Veo bottom-right star watermark from videos AND images using Pure Reverse Alpha Blending. Image mode: lossless gain=1.0; Video mode: gain=1.0 + aspect-ratio-aware Lanczos4 upscaling + audio remux. Zero blurring, 100% texture preservation. Invoke when user wants to clean Gemini watermarks from any file."
 ---
 
 # Gemini 无痕去水印与高保真超分技能 (gemini-watermark-remover-pro)
@@ -23,7 +23,7 @@ description: "Removes the Google Gemini/Veo bottom-right star watermark from vid
    - **彻底剔除任何邻域漫水修补（Inpainting）**，100% 完整保留半透明遮罩下方的底层纹理、反光与颗粒噪点，**零毛玻璃糊斑、零涂抹痕迹**。
 2. **增益适配（图片 vs 视频）**：
    - **图片（无色彩损耗，与官方 `blendModes.js` 图片引擎一致）**：`gain=1.0`，无损精确还原底层纹理。
-   - **视频（有 H.264/YUV420 色度抽样损耗）**：`gain=0.58`，补偿视频压缩损失，平衡中心残白与边缘暗环。
+   - **视频**：`gain=1.0`，完整的反向 Alpha 逆解，确保水印彻底消失；若遇 H.264 色度损耗导致的中心残白，可用 `--gain` 实测下调微调。
    - 均设 `ALPHA_NOISE_FLOOR=3/255` 过滤微小压缩噪声，`ALPHA_THRESHOLD=0.002` 门限激活。
 3. **图片水印尺寸档位自动匹配**：
    - 依据官方 `geminiSizeCatalog.js`：最大边 ≥1600 → 96px 水印 + 64px 边距；其余 → 48px 水印 + 32px 边距。可用 `--logo-size`、`--margin` 覆盖。自动保留 PNG/WebP/TIFF 的 Alpha 通道。

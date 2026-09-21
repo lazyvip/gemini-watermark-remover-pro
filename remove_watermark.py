@@ -323,7 +323,7 @@ def process_image(input_path, output_path, mode="lossless", gain=1.0, logo_size=
     print(f"[错误] 图片写出失败: {output_path}", file=sys.stderr)
     return False
 
-def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", gain=0.58):
+def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", gain=1.0):
     """
     mode:
       - 'lossless': 纯代数反向 Alpha 混合数学解构 (同 lazyvip/gemini-watermark-remover 图像级无损还原，100% 保留底层纹理，零涂抹)
@@ -540,7 +540,7 @@ def main():
             margin=(args.margin if args.margin > 0 else None),
         )
     else:
-        gain = args.gain if args.gain is not None else 0.58
+        gain = args.gain if args.gain is not None else 1.0
         ok = process_video(
             input_path,
             output_path,
