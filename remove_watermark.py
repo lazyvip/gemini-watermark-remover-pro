@@ -136,25 +136,33 @@ def ensure_ffmpeg():
 
     return None
 
+def compute_video_roi(w, h):
+    """
+    计算视频水印 ROI (视频模式专用)。
+    水印是方形四角星，锚定在画面右下角，尺寸随画面较短边等比缩放。
+    以竖屏基准 720x1280 为准：水印 48x48px，距右下角边距 96px。
+    """
+    short_side = min(w, h)
+    scale = short_side / 720.0
+    logo = int(round(48 * scale))
+    margin = int(round(96 * scale))
+    x = w - margin - logo
+    y = h - margin - logo
+    if x < 0:
+        x = 0
+    if y < 0:
+        y = 0
+    return (x, y, logo, logo)
+
 def detect_or_default_roi(sample_frame, custom_roi=None):
     """
     根据给定的分辨率自动缩放 ROI，或使用用户传入的坐标 (x, y, w, h)
-    720x1280 竖屏的默认基准 ROI 坐标为: x=570, y=1137, w=60, h=53
+    水印视为方形并锚定右下角，按较短边统一缩放 (720 边基准: 48x48, 边距96)
     """
     h, w = sample_frame.shape[:2]
     if custom_roi:
         return custom_roi
-    
-    # 基准 720x1280 相对比例
-    base_w, base_h = 720.0, 1280.0
-    scale_x = w / base_w
-    scale_y = h / base_h
-    
-    rx = int(round(570 * scale_x))
-    ry = int(round(1137 * scale_y))
-    rw = int(round(60 * scale_x))
-    rh = int(round(53 * scale_y))
-    return (rx, ry, rw, rh)
+    return compute_video_roi(w, h)
 
 def build_watermark_mask(roi_w, roi_h, scale=1.0, dilate_k=3):
     """
@@ -359,14 +367,8 @@ def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", 
     algorithm_desc = "图片级无损反向 Alpha 逆解 (100%保留底层质感，零模糊)" if mode == "lossless" else mode
     print(f"核心算法: {algorithm_desc}")
     
-    # 精确 ROI 定位 (基准 720x1280 下: x=576, y=1136, 48x48)
-    base_w, base_h = 720.0, 1280.0
-    sx = src_w / base_w
-    sy = src_h / base_h
-    x = int(round(576 * sx))
-    y = int(round(1136 * sy))
-    roi_w = int(round(48 * sx))
-    roi_h = int(round(48 * sy))
+    # 水印为方形且锚定在右下角，按较短边统一缩放定位 (避免横屏时按宽高分别缩放导致压扁漂移)
+    x, y, roi_w, roi_h = compute_video_roi(src_w, src_h)
     print(f"水印精准定位 ROI: x={x}, y={y}, w={roi_w}, h={roi_h}")
     
     # 缩放 Alpha 矩阵并应用底噪截断与视频增益 (算法严格对齐官方 blendModes.js)
