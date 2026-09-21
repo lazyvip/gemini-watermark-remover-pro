@@ -335,8 +335,22 @@ def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    dst_w, dst_h = (1080, 1920) if upscale_1080p else (src_w, src_h)
+
+    if upscale_1080p:
+        # 按原视频宽高比智能超分至 1080P (短边=1080，保持原比例)
+        if src_w >= src_h:
+            # 横屏或方形：高边拉到 1080，宽按比例缩放
+            dst_h = 1080
+            dst_w = int(round(src_w * 1080.0 / src_h))
+        else:
+            # 竖屏：宽边拉到 1080，高按比例缩放
+            dst_w = 1080
+            dst_h = int(round(src_h * 1080.0 / src_w))
+        # 确保偶数尺寸 (H.264/yuv420p 硬性要求)
+        dst_w += dst_w % 2
+        dst_h += dst_h % 2
+    else:
+        dst_w, dst_h = src_w, src_h
     
     print(f"=== Gemini 视频无痕去水印启动 ===")
     print(f"输入视频: {input_path}")

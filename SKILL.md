@@ -28,7 +28,7 @@ description: "Removes the Google Gemini/Veo bottom-right star watermark from vid
 3. **图片水印尺寸档位自动匹配**：
    - 依据官方 `geminiSizeCatalog.js`：最大边 ≥1600 → 96px 水印 + 64px 边距；其余 → 48px 水印 + 32px 边距。可用 `--logo-size`、`--margin` 覆盖。自动保留 PNG/WebP/TIFF 的 Alpha 通道。
 4. **视频超分与音画重封装 (Video Only)**：
-   - Lanczos4 将帧平滑拉伸至 1080×1920；自动抽取原 AAC 音轨，H.264 CRF=18 保真压制，保留音画同步。
+   - Lanczos4 按原视频宽高比智能超分至 1080P（短边=1080，保持原始比例：竖屏→1080×1920，横屏→1920×1080）；自动抽取原 AAC 音轨，H.264 CRF=18 保真压制，保留音画同步。
 5. **跨平台环境自动静默补全**：
    - 智能优先调用系统 FFmpeg，缺失时全自动静默下载静态二进制，抹平 Windows / Mac 环境差异。
 
