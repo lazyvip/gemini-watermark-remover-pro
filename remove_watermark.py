@@ -357,21 +357,29 @@ def build_clean_roi(roi, scaled_alpha, gain, mode="lossless", core_mask=None):
     return clean_roi
 
 
-def auto_calibrate_video(input_path, sample_step=2, progress_every=120):
+def auto_calibrate_video(input_path, sample_step=1, progress_every=120):
     """
-    逐帧增益自动校准 (针对多段拼接视频: 不同片段来自不同源, 水印实际有效强度不一致)。
+    逐帧增益自动校准 (针对多段拼接视频: 不同片段来自不同源, 水印实际有效强度不一致;
+    也覆盖同段内水印强度渐变/淡入淡出、以及整体极淡的情况)。
 
-    原理 (2025-09 实战两案例沉淀):
-    1. 每个采样帧在增益网格 (0.30~0.86 步长0.05) 上模拟去水印,
-       测量「星形高alpha台地」与「低alpha环带」的亮度差 delta;
-       对 delta(g) 做线性拟合, 解 delta = +3 (轻微偏亮不可见) 的 g*。
+    原理 (2025-09 实战三案例沉淀):
+    1. 每个采样帧在增益网格 (0.02~1.00 步长0.02) 上模拟去水印,
+       测量「星形高alpha台地」与「低alpha环带」的亮度差 delta(g);
+       用「括号穿越 + 线性插值」解 delta = +3 (轻微偏亮不可见) 的 g*。
        正残差安全 (人眼对暗鬼影远比对残白敏感), 负 delta 即暗鬼影必须避免。
-    2. 可靠帧过滤: 仅当 (255-背景).min() > 60 (背景够暗、对比够足) 时读数才可信;
-       白色/奶油色等亮背景会让逆解分母被钳制, 读数系统性偏低, 必须剔除。
-    3. 绝不做跨帧中值/均值平滑: 拼接视频的转场交叉淡化区相邻帧所需增益差异极大
-       (实测相邻帧 0.40 vs 0.66), 任何平滑都会毁掉逐帧校准。
+       相比旧版线性拟合: 括号穿越不受曲线非线性段干扰, 且天然覆盖超低增益区间
+       (极淡水印所需增益可低至 0.02~0.20, 旧网格下限 0.30 会过度减除成暗鬼影)。
+    2. 可靠帧分档: 暗背景帧 ((255-背景).min() > 60) 读数最可信;
+       暗背景可靠帧充足 (>=5) 时, 亮背景帧用可靠帧插值替换 (防高光截断偏差泄漏);
+       可靠帧不足 5 个时放开使用全部帧读数 —— 绝不回退增益 1.0
+       (回退 1.0 会把极淡水印过度减除成暗鬼影, 是实测最大翻车点;
+        极淡水印不会触发光高截断, 亮背景帧读数照样精确)。
+    3. 未采样帧 (step>1 时) 用相邻校准帧线性插值填充, 优于中位数:
+       同段内水印强度平滑渐变时插值能跟上趋势, 中位数会滞后。
+    4. 绝不做跨帧中值/均值平滑: 已校准帧的增益原样保留, 不被邻居平均
+       (转场交叉淡化区相邻帧所需增益差异极大, 实测相邻帧 0.40 vs 0.66)。
 
-    返回: gains (ndarray, 每帧一个增益值, 不可信帧用中位数填充)
+    返回: (gains, raw_gains) —— gains 为最终逐帧增益; raw_gains 为原始采样读数
     """
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -392,19 +400,18 @@ def auto_calibrate_video(input_path, sample_step=2, progress_every=120):
         cap.release()
         return None, None
 
-    GRID = np.arange(0.30, 0.861, 0.05)
+    GRID = np.arange(0.02, 1.001, 0.02)
+    TARGET_DELTA = 3.0
     n_g = len(GRID)
-    a_stack = scaled_alpha[None, :, :]
-    ea_grid = np.minimum(a_stack * GRID[:, None, None], 0.99)
-    om_grid = 1.0 - ea_grid
-    sig_grid = (np.maximum(0.0, scaled_alpha - 3.0 / 255.0))[None, :, :] * GRID[:, None, None]
-    act_grid = sig_grid >= 0.002
 
     cal_frames = np.arange(0, total, sample_step)
     gains = np.full(total, np.nan, dtype=np.float32)
+    # brightness_ok: 暗背景可靠帧标记 (亮背景读数仅可靠帧不足时放开)
+    brightness_ok = np.zeros(total, dtype=bool)
 
     print(f"=== 逐帧增益自动校准 ===")
-    print(f"校准采样: 每 {sample_step} 帧 1 帧, 共 {len(cal_frames)} 帧 | ROI({x},{y},{roi_w},{roi_h}) | 目标残差 delta=+3")
+    print(f"校准采样: 每 {sample_step} 帧 1 帧, 共 {len(cal_frames)} 帧 | ROI({x},{y},{roi_w},{roi_h}) | "
+          f"增益网格 [{GRID[0]:.2f}~{GRID[-1]:.2f}] | 目标残差 delta=+{TARGET_DELTA:.0f}")
 
     done = 0
     for fi in cal_frames:
@@ -414,59 +421,86 @@ def auto_calibrate_video(input_path, sample_step=2, progress_every=120):
             continue
         roi = frame[y:y+roi_h, x:x+roi_w].astype(np.float32)
 
-        # 可靠性: 星形高alpha区四角背景亮度 (亮背景读数不可信)
+        # 可靠性标记: 星形高alpha区四角背景亮度 (亮背景读数先降级、不直接丢弃)
         bg = roi[ring].mean(axis=0)
-        if (255.0 - bg).min() <= 60.0:
-            done += 1
-            if done % progress_every == 0:
-                print(f"  校准进度: {done}/{len(cal_frames)} (本帧亮背景跳过)")
-            continue
+        if (255.0 - bg).min() > 60.0:
+            brightness_ok[fi] = True
 
-        clean = np.empty((n_g, roi_h, roi_w, 3), dtype=np.float32)
+        # 逐增益模拟去水印并测台地-环带亮度差 delta(g)
+        deltas = np.empty(n_g, dtype=np.float32)
         for gi in range(n_g):
-            clean[gi] = build_clean_roi(roi, scaled_alpha, float(GRID[gi]))
+            clean = build_clean_roi(roi, scaled_alpha, float(GRID[gi]))
+            deltas[gi] = clean[plateau].mean() - clean[ring].mean(axis=0).mean()
 
-        pl = clean[:, plateau, :].mean(axis=(1, 2))
-        rg = np.stack([c[ring].mean(axis=0).mean() for c in clean])
-        delta = pl - rg
-        A = np.vstack([GRID, np.ones(n_g)]).T
-        try:
-            slope, intercept = np.linalg.lstsq(A, delta, rcond=None)[0]
-        except np.linalg.LinAlgError:
-            continue
-        if abs(slope) < 1e-6:
-            g_star = GRID[np.argmin(np.abs(delta - 3.0))]
-        else:
-            g_star = (3.0 - intercept) / slope
-        if np.isfinite(g_star):
-            gains[fi] = g_star
+        # 括号穿越 + 线性插值解 delta = +TARGET_DELTA 的 g* (不受曲线非线性段干扰)
+        g_star = None
+        for gi in range(n_g - 1):
+            d0, d1 = deltas[gi], deltas[gi + 1]
+            if (d0 - TARGET_DELTA) * (d1 - TARGET_DELTA) <= 0 and d0 != d1:
+                g_star = float(GRID[gi] + (GRID[gi + 1] - GRID[gi]) * (d0 - TARGET_DELTA) / (d0 - d1))
+                break
+        if g_star is None:
+            if deltas[0] < TARGET_DELTA:
+                # 水印极淡: 最小增益都减过头, 钳到网格下限 (绝不回退 1.0 造暗鬼影)
+                g_star = float(GRID[0])
+            else:
+                g_star = float(GRID[-1])
+        gains[fi] = g_star
+
         done += 1
         if done % progress_every == 0:
             print(f"  校准进度: {done}/{len(cal_frames)}")
 
     cap.release()
 
-    valid = gains[np.isfinite(gains)]
-    if len(valid) < 5:
-        print(f"[警告] 可靠校准帧仅 {len(valid)} 个 (亮背景占比过高), 回退全局增益 1.0", file=sys.stderr)
-        return np.ones(total, dtype=np.float32), gains
+    raw = gains.copy()
+    if not np.isfinite(raw).any():
+        print("[警告] 校准帧全部读取失败, 回退全局增益 1.0", file=sys.stderr)
+        return np.ones(total, dtype=np.float32), raw
 
-    med = float(np.median(valid))
-    print(f"校准完成: 可靠帧 {len(valid)}/{len(cal_frames)}, 中位增益 {med:.3f}, "
-          f"范围 [{valid.min():.3f}, {valid.max():.3f}]")
-    if med < 0.85:
+    n_reliable = int((brightness_ok & np.isfinite(raw)).sum())
+
+    # ── 锚点选择: 暗背景可靠帧 >=5 时只用可靠帧做锚; 否则放开全部帧 ──
+    # 亮背景帧读数有高光截断偏差, 但极淡水印不触发截断、读数照样精确;
+    # 宁可用全部帧做锚, 也绝不回退增益 1.0 (1.0 会把极淡水印过度减除成暗鬼影, 实测最大翻车点)。
+    use_all = n_reliable < 5
+    if use_all:
+        print(f"[提示] 暗背景可靠帧仅 {n_reliable} 个, 放开使用全部 {int(np.isfinite(raw).sum())} 帧读数做锚点。",
+              file=sys.stderr)
+        anchors = np.isfinite(raw)
+    else:
+        anchors = np.isfinite(raw) & brightness_ok
+
+    aidx = np.flatnonzero(anchors)
+    if len(aidx) >= 2:
+        final = np.interp(np.arange(total), aidx, raw[aidx]).astype(np.float32)
+    else:
+        # 仅 1 个锚点: 全片沿用该帧增益
+        final = np.full(total, float(raw[aidx[0]]), dtype=np.float32)
+
+    # 已校准帧保留实测值 (锚点帧不被插值曲线拉偏), 其余用相邻锚点线性插值
+    gains = np.where(np.isfinite(raw), raw, final).astype(np.float32)
+
+    med = float(np.median(gains))
+    print(f"校准完成: 暗背景可靠帧 {n_reliable}/{len(cal_frames)}, "
+          f"锚点策略: {'全部帧' if use_all else '仅暗背景帧'}, "
+          f"增益中位数 {med:.3f}, 范围 [{gains.min():.3f}, {gains.max():.3f}]")
+    if med < 0.30:
+        print("[提示] 增益明显 <0.30: 水印整体极淡 (可能整段淡出/低对比生成), 已按帧精确钳制。")
+    elif med < 0.85:
         print("[提示] 检测到拼接视频特征 (有效增益明显 <1.0), 已为每帧生成独立增益。")
-    return np.where(np.isfinite(gains), gains, med).astype(np.float32), gains
+    return gains, raw
 
 
 def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", gain=1.0,
-                  auto_calibrate=False, calibrate_sample_step=2):
+                  auto_calibrate=False, calibrate_sample_step=1):
     """
     mode:
       - 'lossless': 纯代数反向 Alpha 混合数学解构 (同 lazyvip/gemini-watermark-remover 图像级无损还原，100% 保留底层纹理，零涂抹)
       - 'hybrid': 反向 Alpha 混合 + 中心微修补
       - 'inpaint': 经典星状线流体几何修补
-    auto_calibrate: 逐帧增益校准, 用于多段拼接视频 (不同片段水印强度不一致)。
+    auto_calibrate: 逐帧增益校准 (括号穿越解 + 锚点插值), 用于多段拼接视频、
+    水印强度渐变或整体极淡的场景; 失败时回退统一增益。
     """
     if not os.path.exists(input_path):
         print(f"[错误] 输入视频文件不存在: {input_path}", file=sys.stderr)
@@ -648,10 +682,10 @@ def main():
     parser.add_argument("--gain", type=float, default=None,
                         help="Alpha 增益调节 (图片/视频默认 1.0)，用于平衡中心残白与边缘暗环")
     parser.add_argument("--auto-calibrate", action="store_true",
-                        help="(仅视频) 逐帧增益自动校准: 多段拼接视频各片段水印强度不一致时使用, "
-                             "自动为每帧求解最佳增益 (亮背景帧自动跳过并用中位数填充)")
-    parser.add_argument("--calibrate-step", type=int, default=2,
-                        help="(仅视频) 逐帧校准的采样步长, 每 N 帧校准 1 帧, 默认 2 (越小越精确越慢)")
+                        help="(仅视频) 逐帧增益自动校准: 多段拼接视频或水印深浅不一时使用, "
+                             "自动为每帧求解最佳增益 (支持极淡水印; 亮背景帧智能插值)")
+    parser.add_argument("--calibrate-step", type=int, default=1,
+                        help="(仅视频) 逐帧校准的采样步长, 每 N 帧校准 1 帧, 默认 1 (逐帧最精确; 越大越快)")
     parser.add_argument("--logo-size", type=int, default=0, help="(仅图片) 水印像素尺寸，0=根据分辨率自动匹配 48/96")
     parser.add_argument("--margin", type=int, default=0, help="(仅图片) 水印距右下角边距像素，0=自动")
     args = parser.parse_args()
