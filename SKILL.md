@@ -1,6 +1,6 @@
 ---
 name: "gemini-watermark-remover-pro"
-description: "Removes the Google Gemini/Veo bottom-right star watermark from videos AND images using Pure Reverse Alpha Blending. Image mode: lossless gain=1.0; Video mode: gain=1.0 + aspect-ratio-aware Lanczos4 upscaling + audio remux. Zero blurring, 100% texture preservation. Invoke when user wants to clean Gemini watermarks from any file."
+description: "Removes the Google Gemini/Veo bottom-right star watermark from videos AND images using Pure Reverse Alpha Blending. Image mode: lossless gain=1.0; Video mode: gain=1.0 + aspect-ratio-aware Lanczos4 upscaling + audio remux. Supports --auto-calibrate per-frame gain calibration for multi-segment stitched videos with inconsistent watermark strengths. Zero blurring, 100% texture preservation. Invoke when user wants to clean Gemini watermarks from any file."
 ---
 
 # Gemini 无痕去水印与高保真超分技能 (gemini-watermark-remover-pro)
@@ -13,6 +13,7 @@ description: "Removes the Google Gemini/Veo bottom-right star watermark from vid
 - 用户提到“去除 Gemini 图片水印”、“图片右下角星星去掉”、“清理图片水印”。
 - 从 Gemini / Veo 下载了带水印的**图片（png/jpg/webp/bmp/tif）或视频（mp4）**，需要纯净素材用于后期。
 - 用户要求去水印达到“纯图片级”高保真质感，杜绝任何毛玻璃模糊或漫水涂抹痕迹。
+- 用户提到“视频是多段拼接的”、“去完还有残留”、“部分片段水印没去干净”、“水印忽深忽浅”——这类拼接视频需要 `--auto-calibrate` 逐帧校准。
 - 视频模式可选 1080P 超分并保留音轨；图片模式按官方尺寸档位自动匹配 48/96px 水印。
 
 ## 核心算法原理
@@ -49,6 +50,12 @@ python remove_watermark.py "img.png" --logo-size 96 --margin 64
 
 # 5. 指定输出路径与增益
 python remove_watermark.py "input.png" -o out.png --gain 1.0
+
+# 6. 多段拼接视频逐帧自动校准 (各片段水印强度不一致时必用)
+python remove_watermark.py "stitched_video.mp4" --no-upscale --auto-calibrate
+
+# 7. 校准采样步长调整 (默认每 2 帧校准 1 帧; 越小越精确越慢)
+python remove_watermark.py "stitched_video.mp4" --auto-calibrate --calibrate-step 1
 ```
 
 脚本会自动根据输入文件扩展名分流：图片扩展名（png/jpg/jpeg/webp/bmp/tif/tiff/jfif/gif）走图片引擎，其余按视频引擎处理。
@@ -77,6 +84,23 @@ python remove_watermark.py "input.png" -o out.png --gain 1.0
 
 ### 5. 模板尺寸必须匹配目标分辨率
 - 用 48px 模板去匹配已超分到 1080p（水印 72px）的帧会得到错误结果，务必先把模板按比例 resize 到水印实际像素尺寸再匹配。
+
+### 6. 多段拼接视频：不同片段水印有效强度不一致，必须逐帧（分段）校准增益
+- **现象**（2025-09 两案例实战）：Gemini 多段拼接的视频里，不同片段来自不同生成批次，H.264 有损编码程度不同，同一颗星星的实际不透明度每段都不同；用统一 `gain=1.0` 处理，部分片段会出现明显残留，另一部分却偏暗。
+- **根因**：水印叠加发生在各段生成时，拼接后无法用一个增益适配全部片段。
+- ✅ 正确：用 `--auto-calibrate` 逐帧自动校准。原理：对每个采样帧在增益网格 0.30~0.86（步长0.05）上模拟去水印，计算「星形高alpha台地」与「低alpha环带」的亮度差 delta，对 delta(g) 线性拟合解 `delta=+3`（轻微偏亮、肉眼不可见，宁可偏亮不可偏暗成鬼影）。
+- **可靠帧过滤**：仅当 `(255-背景).min() > 60`（环带有足够暗度）时读数才可信；亮背景帧自动跳过并沿用附近可靠帧增益。
+- **绝不做跨帧中值/均值平滑**：转场/拼接缝的相邻帧增益差异极大，平滑会把对的改错。
+
+### 7. 亮背景帧的 delta 验证假阳性：改用高通结构残差判别
+- **现象**：逐帧校准后用 `delta = mean(台地) - mean(环带) > 8` 扫残留，亮背景段 130/480 帧被标白"残留"，但肉眼与对比图均干净。
+- **根因**：亮背景接近 255 时，源视频编码阶段就发生高光截断（信息永久丢失），反解后天台区天然偏亮——这是**平滑的亮度抬升**，不是星形锐利残留。
+- ✅ 正确：用**高通结构残差**判别真伪残留：`hp = gray - GaussianBlur(gray, 31)`，比较台地与环带的 `mean(|hp|)` 差。真水印残留是锐利星形结构（差值 > 2.0），平滑亮度梯度差值 ≈ 0。实测同一视频：人工验收版 16 帧结构残留，逐帧校准版仅 4 帧。
+- **通用原则**：验证指标必须区分背景亮度选用；delta 类指标只适合暗背景帧。
+
+### 8. 实测效果：逐帧校准优于人工调参
+- 对同一拼接视频：恒定增益 0.604 版（人工验收）在可靠帧上 delta 均值 -7.34（轻微暗鬼影），逐帧校准版 +3.44（正中目标）；高通结构残差 0.327 vs 0.070。
+- 结论：`--auto-calibrate` 应作为拼接视频的默认推荐；单段短视频无需开启（gain=1.0 即可）。
 
 ## 读者公众号技术分享建议
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Gemini Video Watermark Remover (无痕去水印与高保真超分工具)
-专为去除 Google Gemini / Veo 视频右下角固定四角星水印设计。
-采用自适应 ROI 定位 + 椭圆形态学边缘羽化 + Navier-Stokes / Telea 时空流体修补 + Lanczos4 超分算法。
+Gemini Watermark Remover (无痕去水印与高保真超分工具, 图片+视频)
+专为去除 Google Gemini / Veo 内容右下角固定四角星水印设计。
+核心: 纯代数反向 Alpha 混合逆解 (Pure Reverse Alpha Blending), 100% 保留底层纹理, 零模糊零涂抹。
+支持 --auto-calibrate 逐帧增益校准: 应对多段拼接视频各片段水印强度不一致的场景 (实战经验)。
 """
 
 import os
@@ -323,12 +324,149 @@ def process_image(input_path, output_path, mode="lossless", gain=1.0, logo_size=
     print(f"[错误] 图片写出失败: {output_path}", file=sys.stderr)
     return False
 
-def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", gain=1.0):
+def alpha_for_size(roi_w, roi_h):
+    """缩放 48 基准 Alpha Map 到目标水印尺寸 (视频/校准共用)。"""
+    if roi_w == 48 and roi_h == 48:
+        return ALPHA_MAP_NORM.copy()
+    return cv2.resize(ALPHA_MAP_NORM, (roi_w, roi_h), interpolation=cv2.INTER_LANCZOS4)
+
+
+def build_clean_roi(roi, scaled_alpha, gain, mode="lossless", core_mask=None):
+    """
+    对单帧 ROI 执行纯代数反向 Alpha 逆解 (渲染主循环与校准器共用的同一实现)。
+    roi: float32 (h, w, 3); scaled_alpha: float32 (h, w) 归一化 0~1
+    """
+    ALPHA_NOISE_FLOOR = 3.0 / 255.0
+    ALPHA_THRESHOLD = 0.002
+    MAX_ALPHA = 0.99
+    LOGO_VALUE = 255.0
+
+    sig_alpha = np.maximum(0.0, scaled_alpha - ALPHA_NOISE_FLOOR) * gain
+    active_mask = sig_alpha >= ALPHA_THRESHOLD
+    effective_alpha = np.minimum(scaled_alpha * gain, MAX_ALPHA)
+    one_minus_alpha = 1.0 - effective_alpha
+
+    out = roi.copy()
+    for c in range(3):
+        orig_c = (roi[:, :, c] - effective_alpha * LOGO_VALUE) / one_minus_alpha
+        out[:, :, c] = np.where(active_mask, np.clip(np.round(orig_c), 0, 255), roi[:, :, c])
+    clean_roi = out.astype(np.uint8)
+
+    if mode == "hybrid" and core_mask is not None:
+        clean_roi = cv2.inpaint(clean_roi, core_mask, 2, cv2.INPAINT_TELEA)
+    return clean_roi
+
+
+def auto_calibrate_video(input_path, sample_step=2, progress_every=120):
+    """
+    逐帧增益自动校准 (针对多段拼接视频: 不同片段来自不同源, 水印实际有效强度不一致)。
+
+    原理 (2025-09 实战两案例沉淀):
+    1. 每个采样帧在增益网格 (0.30~0.86 步长0.05) 上模拟去水印,
+       测量「星形高alpha台地」与「低alpha环带」的亮度差 delta;
+       对 delta(g) 做线性拟合, 解 delta = +3 (轻微偏亮不可见) 的 g*。
+       正残差安全 (人眼对暗鬼影远比对残白敏感), 负 delta 即暗鬼影必须避免。
+    2. 可靠帧过滤: 仅当 (255-背景).min() > 60 (背景够暗、对比够足) 时读数才可信;
+       白色/奶油色等亮背景会让逆解分母被钳制, 读数系统性偏低, 必须剔除。
+    3. 绝不做跨帧中值/均值平滑: 拼接视频的转场交叉淡化区相邻帧所需增益差异极大
+       (实测相邻帧 0.40 vs 0.66), 任何平滑都会毁掉逐帧校准。
+
+    返回: gains (ndarray, 每帧一个增益值, 不可信帧用中位数填充)
+    """
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        print(f"[错误] 无法打开输入视频进行校准: {input_path}", file=sys.stderr)
+        return None, None
+
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    x, y, roi_w, roi_h = compute_video_roi(src_w, src_h)
+    scaled_alpha = alpha_for_size(roi_w, roi_h)
+
+    plateau = scaled_alpha > 0.45
+    ring = scaled_alpha < 0.02
+    n_pl = int(plateau.sum())
+    if n_pl < 8 or not ring.any():
+        print("[错误] 校准区域过小, 放弃自动校准", file=sys.stderr)
+        cap.release()
+        return None, None
+
+    GRID = np.arange(0.30, 0.861, 0.05)
+    n_g = len(GRID)
+    a_stack = scaled_alpha[None, :, :]
+    ea_grid = np.minimum(a_stack * GRID[:, None, None], 0.99)
+    om_grid = 1.0 - ea_grid
+    sig_grid = (np.maximum(0.0, scaled_alpha - 3.0 / 255.0))[None, :, :] * GRID[:, None, None]
+    act_grid = sig_grid >= 0.002
+
+    cal_frames = np.arange(0, total, sample_step)
+    gains = np.full(total, np.nan, dtype=np.float32)
+
+    print(f"=== 逐帧增益自动校准 ===")
+    print(f"校准采样: 每 {sample_step} 帧 1 帧, 共 {len(cal_frames)} 帧 | ROI({x},{y},{roi_w},{roi_h}) | 目标残差 delta=+3")
+
+    done = 0
+    for fi in cal_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        roi = frame[y:y+roi_h, x:x+roi_w].astype(np.float32)
+
+        # 可靠性: 星形高alpha区四角背景亮度 (亮背景读数不可信)
+        bg = roi[ring].mean(axis=0)
+        if (255.0 - bg).min() <= 60.0:
+            done += 1
+            if done % progress_every == 0:
+                print(f"  校准进度: {done}/{len(cal_frames)} (本帧亮背景跳过)")
+            continue
+
+        clean = np.empty((n_g, roi_h, roi_w, 3), dtype=np.float32)
+        for gi in range(n_g):
+            clean[gi] = build_clean_roi(roi, scaled_alpha, float(GRID[gi]))
+
+        pl = clean[:, plateau, :].mean(axis=(1, 2))
+        rg = np.stack([c[ring].mean(axis=0).mean() for c in clean])
+        delta = pl - rg
+        A = np.vstack([GRID, np.ones(n_g)]).T
+        try:
+            slope, intercept = np.linalg.lstsq(A, delta, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            continue
+        if abs(slope) < 1e-6:
+            g_star = GRID[np.argmin(np.abs(delta - 3.0))]
+        else:
+            g_star = (3.0 - intercept) / slope
+        if np.isfinite(g_star):
+            gains[fi] = g_star
+        done += 1
+        if done % progress_every == 0:
+            print(f"  校准进度: {done}/{len(cal_frames)}")
+
+    cap.release()
+
+    valid = gains[np.isfinite(gains)]
+    if len(valid) < 5:
+        print(f"[警告] 可靠校准帧仅 {len(valid)} 个 (亮背景占比过高), 回退全局增益 1.0", file=sys.stderr)
+        return np.ones(total, dtype=np.float32), gains
+
+    med = float(np.median(valid))
+    print(f"校准完成: 可靠帧 {len(valid)}/{len(cal_frames)}, 中位增益 {med:.3f}, "
+          f"范围 [{valid.min():.3f}, {valid.max():.3f}]")
+    if med < 0.85:
+        print("[提示] 检测到拼接视频特征 (有效增益明显 <1.0), 已为每帧生成独立增益。")
+    return np.where(np.isfinite(gains), gains, med).astype(np.float32), gains
+
+
+def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", gain=1.0,
+                  auto_calibrate=False, calibrate_sample_step=2):
     """
     mode:
       - 'lossless': 纯代数反向 Alpha 混合数学解构 (同 lazyvip/gemini-watermark-remover 图像级无损还原，100% 保留底层纹理，零涂抹)
       - 'hybrid': 反向 Alpha 混合 + 中心微修补
       - 'inpaint': 经典星状线流体几何修补
+    auto_calibrate: 逐帧增益校准, 用于多段拼接视频 (不同片段水印强度不一致)。
     """
     if not os.path.exists(input_path):
         print(f"[错误] 输入视频文件不存在: {input_path}", file=sys.stderr)
@@ -372,24 +510,26 @@ def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", 
     print(f"水印精准定位 ROI: x={x}, y={y}, w={roi_w}, h={roi_h}")
     
     # 缩放 Alpha 矩阵并应用底噪截断与视频增益 (算法严格对齐官方 blendModes.js)
-    if roi_w == 48 and roi_h == 48:
-        scaled_alpha = ALPHA_MAP_NORM.copy()
-    else:
-        scaled_alpha = cv2.resize(ALPHA_MAP_NORM, (roi_w, roi_h), interpolation=cv2.INTER_LANCZOS4)
-        
+    scaled_alpha = alpha_for_size(roi_w, roi_h)
+
     ALPHA_NOISE_FLOOR = 3.0 / 255.0
     ALPHA_THRESHOLD = 0.002
     MAX_ALPHA = 0.99
-    LOGO_VALUE = 255.0
 
-    sig_alpha = np.maximum(0.0, scaled_alpha - ALPHA_NOISE_FLOOR) * gain
-    active_mask = sig_alpha >= ALPHA_THRESHOLD
-    effective_alpha = np.minimum(scaled_alpha * gain, MAX_ALPHA)
-    one_minus_alpha = 1.0 - effective_alpha
-    
+    # 逐帧增益校准: 多段拼接视频各片段水印强度不一致, 需按帧取增益
+    per_frame_gains = None
+    if auto_calibrate:
+        per_frame_gains, raw_gains = auto_calibrate_video(
+            input_path, sample_step=max(1, int(calibrate_sample_step)))
+        if per_frame_gains is None:
+            print("[警告] 自动校准失败, 回退统一增益", file=sys.stderr)
+
     # 若为 hybrid 模式，准备微修补掩码
+    core_mask = None
     if mode == "hybrid":
-        core_mask = (effective_alpha > 0.25).astype(np.uint8) * 255
+        _g0 = float(per_frame_gains[0]) if per_frame_gains is not None else gain
+        _ea = np.minimum(scaled_alpha * _g0, MAX_ALPHA)
+        core_mask = (_ea > 0.25).astype(np.uint8) * 255
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         core_mask = cv2.dilate(core_mask, kernel, iterations=1)
     
@@ -416,16 +556,13 @@ def process_video(input_path, output_path, upscale_1080p=True, mode="lossless", 
                 local_mask = build_watermark_mask(roi_w, roi_h, scale=roi_w/48.0, dilate_k=3)
                 frame[y:y+roi_h, x:x+roi_w] = cv2.inpaint(frame[y:y+roi_h, x:x+roi_w], local_mask, 5, cv2.INPAINT_TELEA)
             else:
-                # 严格无损反向 Alpha 代数逆解: original = (watermarked - alpha * 255) / (1 - alpha)
-                for c in range(3):
-                    orig_c = (roi[:, :, c] - effective_alpha * LOGO_VALUE) / one_minus_alpha
-                    roi[:, :, c] = np.where(active_mask, np.clip(np.round(orig_c), 0, 255), roi[:, :, c])
-                
-                clean_roi = roi.astype(np.uint8)
-                
-                if mode == "hybrid":
-                    clean_roi = cv2.inpaint(clean_roi, core_mask, 2, cv2.INPAINT_TELEA)
-                    
+                # 纯代数反向 Alpha 逆解: original = (watermarked - alpha * 255) / (1 - alpha)
+                # 校准模式下每帧取各自的增益 (拼接视频各片段水印有效强度不同)
+                if per_frame_gains is not None:
+                    frame_gain = float(per_frame_gains[frame_idx])
+                else:
+                    frame_gain = gain
+                clean_roi = build_clean_roi(roi, scaled_alpha, frame_gain, mode=mode, core_mask=core_mask)
                 frame[y:y+roi_h, x:x+roi_w] = clean_roi
             
             if upscale_1080p:
@@ -509,7 +646,12 @@ def main():
     parser.add_argument("--mode", choices=["lossless", "hybrid", "inpaint"], default="lossless", 
                         help="去水印模式: lossless(纯反向Alpha无损还原，完全保留底层纹理，默认推荐), hybrid(反向Alpha+微修补), inpaint(经典流体修补)")
     parser.add_argument("--gain", type=float, default=None,
-                        help="Alpha 增益调节 (图片默认 1.0，视频默认 0.58)，用于平衡中心残白与边缘暗环")
+                        help="Alpha 增益调节 (图片/视频默认 1.0)，用于平衡中心残白与边缘暗环")
+    parser.add_argument("--auto-calibrate", action="store_true",
+                        help="(仅视频) 逐帧增益自动校准: 多段拼接视频各片段水印强度不一致时使用, "
+                             "自动为每帧求解最佳增益 (亮背景帧自动跳过并用中位数填充)")
+    parser.add_argument("--calibrate-step", type=int, default=2,
+                        help="(仅视频) 逐帧校准的采样步长, 每 N 帧校准 1 帧, 默认 2 (越小越精确越慢)")
     parser.add_argument("--logo-size", type=int, default=0, help="(仅图片) 水印像素尺寸，0=根据分辨率自动匹配 48/96")
     parser.add_argument("--margin", type=int, default=0, help="(仅图片) 水印距右下角边距像素，0=自动")
     args = parser.parse_args()
@@ -547,6 +689,8 @@ def main():
             upscale_1080p=(not args.no_upscale),
             mode=args.mode,
             gain=gain,
+            auto_calibrate=args.auto_calibrate,
+            calibrate_sample_step=args.calibrate_step,
         )
 
     sys.exit(0 if ok else 1)

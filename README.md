@@ -35,6 +35,7 @@
 - ✅ 同时支持 **图片**（PNG/JPG/WEBP/…）和 **视频**（MP4）
 - ✅ 单像素纯代数逆解，**无 Inpaint 漫水**，杜绝糊斑
 - ✅ 视频可选 **Lanczos4 超分至 1080P** 并保留原音轨
+- ✅ **多段拼接视频** 支持 `--auto-calibrate` 逐帧增益校准（各片段水印强度不一致时一键搞定）
 - ✅ **零配置**：自动补全 FFmpeg，Windows 拖拽即用
 - ✅ 可作 **Trae/Claude Skill** 挂载，交给 AI 自动执行
 
@@ -194,7 +195,30 @@ python remove_watermark.py "img.png" --logo-size 96 --margin 64
 
 # 切换去水印模式（默认 lossless 最佳）
 python remove_watermark.py "video.mp4" --mode hybrid
+
+# 多段拼接视频逐帧自动校准（不同片段水印深浅不一、去完仍有残留时使用）
+python remove_watermark.py "stitched_video.mp4" --no-upscale --auto-calibrate
 ```
+
+### 多段拼接视频的「逐帧自动校准」（进阶）
+
+**问题背景**：用 Gemini 分段生成再拼接的视频（或从不同批次下载的片段），各段 H.264 编码损耗不同，导致同一颗星星的实际不透明度**每段都不一样**——统一增益必然顾此失彼：有的段残留白星，有的段出现暗鬼影。
+
+**解决原理**（2025-09 两个实战案例沉淀）：
+
+1. 对每个采样帧，在增益网格 `0.30 ~ 0.86`（步长 0.05）上**模拟**去水印；
+2. 测量「星形高 alpha 台地」与「低 alpha 环带」的亮度差 `delta(g)`，线性拟合后解 `delta = +3`（轻微偏亮不可见——宁偏亮，不偏暗成鬼影）；
+3. **可靠帧过滤**：仅当环带背景足够暗（`(255-bg).min() > 60`）时读数才可信；亮背景帧自动跳过并沿用邻近增益；
+4. **绝不做跨帧平滑**：拼接缝/转场的相邻帧增益差异极大，平滑会把对的改错。
+
+**实测效果**（480 帧拼接视频）：
+
+| 方案 | 可靠帧 delta 均值 | 高通结构残留帧数 |
+|------|------|------|
+| 人工调参恒定增益 0.604 | -7.34（轻微暗鬼影） | 16 帧 |
+| `--auto-calibrate` 逐帧校准 | **+3.44（正中目标）** | **4 帧** |
+
+> 💡 验证残留真伪时注意：亮背景帧反解后 delta 天然偏正（编码高光截断所致，平滑不锐利、肉眼不可见），属**假阳性**。判别真残留请用高通结构残差（`hp = gray - GaussianBlur(gray, 31)`，台地与环带 `mean(|hp|)` 差 > 2.0 才算锐利残留）。
 
 ### 作为 Trae / Claude Skill 使用
 
@@ -216,12 +240,26 @@ python remove_watermark.py "video.mp4" --mode hybrid
 | `--mode` | 去水印模式：`lossless` / `hybrid` / `inpaint` | `lossless` |
 | `--gain` | Alpha 增益：默认视频 1.0，图片 1.0；视频可按需下调 | 自动识别 |
 | `--no-upscale` | （视频）不做 1080P 超分 | 关闭 |
+| `--auto-calibrate` | （视频）逐帧增益自动校准，多段拼接视频各片段水印强度不一致时使用 | 关闭 |
+| `--calibrate-step` | （视频）校准采样步长，每 N 帧校准 1 帧，越小越精确越慢 | `2` |
 | `--logo-size` | （图片）水印像素尺寸 | 0=自动 |
 | `--margin` | （图片）水印距右下角边距 | 0=自动 |
 
 ---
 
 ## ❓ 常见问题
+
+<details>
+<summary>视频是多段拼接的，去完有的片段还有残留/发暗怎么办？</summary>
+
+这是拼接视频的典型问题：各段生成批次不同，水印实际不透明度每段都不一样，统一增益无法兼顾。加 `--auto-calibrate` 逐帧自动校准即可：
+
+```bash
+python remove_watermark.py "stitched_video.mp4" --no-upscale --auto-calibrate
+```
+
+脚本会自动为每帧求解最佳增益（亮背景帧自动跳过并沿用邻近增益），实测比人工调参更干净。
+</details>
 
 <details>
 <summary>为什么我的图片去水印后有残留？</summary>
